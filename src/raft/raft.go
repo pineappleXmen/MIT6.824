@@ -80,10 +80,6 @@ type Raft struct {
 	CommitIndex           int
 	LastApplied           int
 
-	//2B
-	ApplyCh    chan ApplyMsg
-	LeaderCond sync.Cond
-
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -239,12 +235,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
+
 	// Your code here (2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.CurState != Leader {
-		return rf.CommitIndex, rf.CurrentTerm, false
-	}
 
 	return index, term, isLeader
 }
@@ -322,7 +314,6 @@ func (rf *Raft) AppendEntriesRequest(args *AppendEntriesArgs, reply *AppendEntri
 		rf.CurState = Follower
 		rf.VoteFor = -1
 	}
-	log.Printf("[%d] got the appendentries request from leader %d at term %d", rf.me, args.LeaderId, args.Term)
 	rf.LastMsgFromLeaderTime = time.Now()
 }
 
@@ -384,7 +375,6 @@ func (rf *Raft) AttemptElection() bool {
 			}
 			log.Printf("[%d] got enough vote become the leader of term [%d]", rf.me, rf.CurrentTerm)
 			rf.CurState = Leader
-			rf.LeaderCond.Broadcast()
 			return
 		}(index)
 	}
@@ -451,7 +441,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-
 	rf := &Raft{
 		mu:                    sync.Mutex{},
 		peers:                 peers,
@@ -463,13 +452,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Log:                   nil,
 		CurState:              0,
 		LastMsgFromLeaderTime: time.Time{},
-
-		CommitIndex: 0,
-		LastApplied: 0,
-		ApplyCh:     applyCh,
+		CommitIndex:           0,
+		LastApplied:           0,
 	}
-	rf.LeaderCond = *sync.NewCond(&rf.mu)
-
 	//rf.peers = peers
 	//rf.persister = persister
 	//rf.me = me
@@ -483,15 +468,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	_, isleader := rf.GetState()
 	if !isleader {
 		go rf.ticker()
+	} else {
+		go rf.AttempHeartBeat()
 	}
-
-	rf.mu.Lock()
-	for !isleader {
-		rf.LeaderCond.Wait()
-		time.Sleep(100 * time.Millisecond)
-		rf.AttempHeartBeat()
-	}
-	rf.mu.Unlock()
-
 	return rf
 }
