@@ -203,7 +203,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	// 持久化快照信息
 	rf.persist()
-
 }
 
 //
