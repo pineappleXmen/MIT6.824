@@ -7,9 +7,10 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -18,11 +19,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Command     string
+	Key         string
+	Value       string
+	SeqID       int
+	ClientID    int64
+	IndexInRaft int
 }
 
 type KVServer struct {
@@ -35,18 +38,135 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	seqMap    map[int64]int     //为了确保seq只执行一次	clientId / seqId
+	waitChMap map[int]chan Op   //传递由下层Raft服务的appCh传过来的command	index / chan(Op)
+	kvPersist map[string]string // 存储持久化的KV键值对	K / V
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+
+	if kv.killed() {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	_, ifLeader := kv.rf.GetState()
+	if !ifLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	// 封装Op传到下层start
+	op := Op{Command: "Get", Key: args.Key, SeqID: args.SeqID, ClientID: args.ClientID}
+	//fmt.Printf("[ ----Server[%v]----] : send a Get,op is :%+v \n", kv.me, op)
+	lastIndex, _, _ := kv.rf.Start(op)
+
+	ch := kv.getWaitCh(lastIndex)
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.waitChMap, op.IndexInRaft)
+		kv.mu.Unlock()
+	}()
+
+	// 设置超时ticker
+	timer := time.NewTicker(100 * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case replyOp := <-ch:
+		//fmt.Printf("[ ----Server[%v]----] : receive a GetAsk :%+v,replyOp:+%v\n", kv.me, args, replyOp)
+		if op.ClientID != replyOp.ClientID || op.SeqID != replyOp.SeqID {
+			reply.Err = ErrWrongLeader
+		} else {
+			reply.Err = OK
+			DPrintf("[%d] kvpersister is %v", args.ClientID, kv.kvPersist)
+			kv.mu.Lock()
+			reply.Value = kv.kvPersist[args.Key]
+			kv.mu.Unlock()
+			return
+		}
+	case <-timer.C:
+		reply.Err = ErrWrongLeader
+	}
+
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+
+	if kv.killed() {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	_, ifLeader := kv.rf.GetState()
+	if !ifLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	// 封装Op传到下层start
+	op := Op{Command: args.Op, Key: args.Key, Value: args.Value, SeqID: args.SeqID, ClientID: args.ClientID}
+	//fmt.Printf("[ ----Server[%v]----] : send a %v,op is :%+v \n", kv.me, args.Op, op)
+	lastIndex, _, _ := kv.rf.Start(op)
+
+	ch := kv.getWaitCh(lastIndex)
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.waitChMap, op.IndexInRaft)
+		kv.mu.Unlock()
+	}()
+
+	// 设置超时ticker
+	timer := time.NewTicker(100 * time.Millisecond)
+	select {
+	case replyOp := <-ch:
+		//fmt.Printf("[ ----Server[%v]----] : receive a %vAsk :%+v,Op:%+v\n", kv.me, args.Op, args, replyOp)
+		// 通过clientId、seqId确定唯一操作序列
+		if op.ClientID != replyOp.ClientID || op.SeqID != replyOp.SeqID {
+			reply.Err = ErrWrongLeader
+		} else {
+			reply.Err = OK
+			DPrintf("[%d] kvpersister is %v", args.ClientID, kv.kvPersist)
+		}
+
+	case <-timer.C:
+		reply.Err = ErrWrongLeader
+	}
+
+	defer timer.Stop()
 }
 
-//
+// 处理applyCh发送过来的ApplyMsg
+func (kv *KVServer) applyMsgHandlerLoop() {
+	for {
+		if kv.killed() {
+			return
+		}
+		select {
+		case msg := <-kv.applyCh:
+			index := msg.CommandIndex
+			op := msg.Command.(Op)
+			//fmt.Printf("[ ~~~~applyMsgHandlerLoop~~~~ ]: %+v\n", msg)
+			if !kv.ifDuplicate(op.ClientID, op.SeqID) {
+				kv.mu.Lock()
+				switch op.Command {
+				case "Put":
+					kv.kvPersist[op.Key] = op.Value
+				case "Append":
+					kv.kvPersist[op.Key] += op.Value
+				}
+				kv.seqMap[op.ClientID] = op.SeqID
+				kv.mu.Unlock()
+			}
+			// 将返回的ch返回waitCh
+			kv.getWaitCh(index) <- op
+		}
+	}
+}
+
+// Kill
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. for your convenience, we supply
 // code to set rf.dead (without needing a lock),
@@ -67,7 +187,7 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-//
+// StartKVServer
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -96,6 +216,31 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.seqMap = make(map[int64]int)
+	kv.kvPersist = make(map[string]string)
+	kv.waitChMap = make(map[int]chan Op)
 
+	go kv.applyMsgHandlerLoop()
 	return kv
+}
+func (kv *KVServer) getWaitCh(index int) chan Op {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	ch, exist := kv.waitChMap[index]
+	if !exist {
+		kv.waitChMap[index] = make(chan Op, 1)
+		ch = kv.waitChMap[index]
+	}
+	return ch
+}
+
+func (kv *KVServer) ifDuplicate(clientId int64, seqId int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	lastSeqId, exist := kv.seqMap[clientId]
+	if !exist {
+		return false
+	}
+	return seqId <= lastSeqId
 }
