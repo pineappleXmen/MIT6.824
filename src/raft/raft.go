@@ -696,7 +696,6 @@ func (rf *Raft) InstallSnapshotRequest(args *InstallSnapshotArgs, reply *Install
 	}
 	if index > rf.LastApplied {
 		rf.LastApplied = index
-		log.Printf("[%d] lastapplied at installrequ %d", rf.me, rf.LastApplied)
 	}
 	rf.persister.SaveStateAndSnapshot(rf.persistData(), args.Data)
 
@@ -875,7 +874,6 @@ func (rf *Raft) getLogTerm(index int) int {
 	if index == rf.LastIncludeIndex {
 		return rf.LastIncludeTerm
 	}
-	log.Printf("[%d]index : %d,lastincludeindex %d", rf.me, index, rf.LastIncludeIndex)
 	return rf.Log[index-rf.LastIncludeIndex].LogTerm
 }
 
