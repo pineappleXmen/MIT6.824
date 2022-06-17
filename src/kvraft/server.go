@@ -94,7 +94,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-
 	if kv.killed() {
 		reply.Err = ErrWrongLeader
 		return
@@ -108,8 +107,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	// 封装Op传到下层start
 	op := Op{Command: args.Op, Key: args.Key, Value: args.Value, SeqID: args.SeqID, ClientID: args.ClientID}
-	//fmt.Printf("[ ----Server[%v]----] : send a %v,op is :%+v \n", kv.me, args.Op, op)
 	lastIndex, _, _ := kv.rf.Start(op)
+	DPrintf("[%d][PutAppend][Server] Sending Ops to Raft %v", kv.me, op)
 
 	ch := kv.getWaitCh(lastIndex)
 	defer func() {
@@ -119,7 +118,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}()
 
 	// 设置超时ticker
-	timer := time.NewTicker(100 * time.Millisecond)
+	timer := time.NewTicker(1000 * time.Millisecond)
 	select {
 	case replyOp := <-ch:
 		//fmt.Printf("[ ----Server[%v]----] : receive a %vAsk :%+v,Op:%+v\n", kv.me, args.Op, args, replyOp)
@@ -128,7 +127,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = ErrWrongLeader
 		} else {
 			reply.Err = OK
-			DPrintf("[%d] kvpersister is %v", args.ClientID, kv.kvPersist)
 		}
 
 	case <-timer.C:
@@ -146,6 +144,7 @@ func (kv *KVServer) applyMsgHandlerLoop() {
 		}
 		select {
 		case msg := <-kv.applyCh:
+			DPrintf("[Server] got the applied msg from Raft %v", msg)
 			index := msg.CommandIndex
 			op := msg.Command.(Op)
 			//fmt.Printf("[ ~~~~applyMsgHandlerLoop~~~~ ]: %+v\n", msg)
@@ -154,6 +153,7 @@ func (kv *KVServer) applyMsgHandlerLoop() {
 				switch op.Command {
 				case "Put":
 					kv.kvPersist[op.Key] = op.Value
+					DPrintf("[Server] Success execute Put Ops at %d", kv.me)
 				case "Append":
 					kv.kvPersist[op.Key] += op.Value
 				}

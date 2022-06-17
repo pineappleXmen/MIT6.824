@@ -45,7 +45,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-	DPrintf("[%d] is calling get %s", ck.ClientID, key)
+	DPrintf("[%d][GET][Client] is calling GET %s", ck.ClientID, key)
 	ck.SeqID++
 	args := GetArgs{
 		Key:      key,
@@ -57,7 +57,7 @@ func (ck *Clerk) Get(key string) string {
 		reply := GetReply{}
 		ok := ck.servers[curLeaderID].Call("KVServer.Get", &args, &reply)
 		if ok {
-			log.Printf("[%d] getRPC ok", curLeaderID)
+			log.Printf("[%d][GET][Client] Success msg from Server %d", ck.ClientID, ck.CurLeader)
 			if reply.Err == OK {
 				ck.CurLeader = curLeaderID
 				return reply.Value
@@ -69,7 +69,7 @@ func (ck *Clerk) Get(key string) string {
 				continue
 			}
 		} else {
-			log.Printf("[%d] Failed to connect", curLeaderID)
+			log.Printf("[%d][GET][Client] Failed to connect %d", ck.ClientID, ck.CurLeader)
 		}
 		curLeaderID = (curLeaderID + 1) % len(ck.servers)
 	}
@@ -88,7 +88,7 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	DPrintf("[%d] is calling put %s %v", ck.ClientID, key, value)
+	DPrintf("[%d][PutAppend][Client] is calling put %s %v", ck.ClientID, key, value)
 	ck.SeqID++
 	curLeaderID := ck.CurLeader
 	args := PutAppendArgs{
@@ -103,8 +103,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ok := ck.servers[curLeaderID].Call("KVServer.PutAppend", &args, &reply)
 		if ok {
 			if reply.Err == OK {
-				//DPrintf("[%d][PutAppend] PutAppend success", curLeaderID)
 				ck.CurLeader = curLeaderID
+				break
 			}
 			if reply.Err == ErrWrongLeader {
 				curLeaderID = (curLeaderID + 1) % len(ck.servers)
